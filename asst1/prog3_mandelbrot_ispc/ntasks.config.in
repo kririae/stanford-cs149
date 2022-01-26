@@ -1,1 +1,1 @@
-uniform int nTasks = 64;
+uniform int nTasks = 128;

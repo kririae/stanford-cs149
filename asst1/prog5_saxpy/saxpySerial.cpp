@@ -1,13 +1,7 @@
+#include "atom.h"
 
-void saxpySerial(int N,
-                       float scale,
-                       float X[],
-                       float Y[],
-                       float result[])
-{
-
-    for (int i=0; i<N; i++) {
-        result[i] = scale * X[i] + Y[i];
-    }
+void saxpySerial(int N, float scale, Atom in[]) {
+  for (int i = 0; i < N; i++) {
+    in[i].res = scale * in[i].x + in[i].y;
+  }
 }
-

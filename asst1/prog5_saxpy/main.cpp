@@ -4,7 +4,9 @@
 #include "CycleTimer.h"
 #include "saxpy_ispc.h"
 
-extern void saxpySerial(int N, float a, float* X, float* Y, float* result);
+#include "atom.h"
+
+extern void saxpySerial(int N, float a, Atom* X);
 
 // return GB/s
 static float toBW(int bytes, float sec) {
@@ -32,6 +34,7 @@ int main() {
 
   float scale = 2.f;
 
+  Atom*  array        = (Atom*)malloc(N * sizeof(float));
   float* arrayX       = new float[N];
   float* arrayY       = new float[N];
   float* resultSerial = new float[N];
@@ -40,11 +43,14 @@ int main() {
 
   // initialize array values
   for (unsigned int i = 0; i < N; i++) {
-    arrayX[i]       = i;
-    arrayY[i]       = i;
-    resultSerial[i] = 0.f;
-    resultISPC[i]   = 0.f;
-    resultTasks[i]  = 0.f;
+    array[i].x   = i;
+    array[i].y   = i;
+    array[i].res = 0.0f;
+    // arrayX[i]       = i;
+    // arrayY[i]       = i;
+    // resultSerial[i] = 0.f;
+    // resultISPC[i]   = 0.f;
+    // resultTasks[i]  = 0.f;
   }
 
   //
@@ -59,10 +65,9 @@ int main() {
     minSerial      = std::min(minSerial, endTime - startTime);
   }
 
-  // printf("[saxpy serial]:\t\t[%.3f] ms\t[%.3f] GB/s\t[%.3f] GFLOPS\n",
-  //       minSerial * 1000,
-  //       toBW(TOTAL_BYTES, minSerial),
-  //       toGFLOPS(TOTAL_FLOPS, minSerial));
+  printf("[saxpy serial]:\t\t[%.3f] ms\t[%.3f] GB/s\t[%.3f] GFLOPS\n",
+         minSerial * 1000, toBW(TOTAL_BYTES, minSerial),
+         toGFLOPS(TOTAL_FLOPS, minSerial));
 
   //
   // Run the ISPC (single core) implementation
@@ -92,7 +97,7 @@ int main() {
     minTaskISPC    = std::min(minTaskISPC, endTime - startTime);
   }
 
-  verifyResult(N, resultTasks, resultSerial);
+  // verifyResult(N, resultTasks, resultSerial);
 
   printf("[saxpy task ispc]:\t[%.3f] ms\t[%.3f] GB/s\t[%.3f] GFLOPS\n",
          minTaskISPC * 1000, toBW(TOTAL_BYTES, minTaskISPC),
@@ -102,6 +107,7 @@ int main() {
   // printf("\t\t\t\t(%.2fx speedup from ISPC)\n", minSerial/minISPC);
   // printf("\t\t\t\t(%.2fx speedup from task ISPC)\n", minSerial/minTaskISPC);
 
+  free(array);
   delete[] arrayX;
   delete[] arrayY;
   delete[] resultSerial;
