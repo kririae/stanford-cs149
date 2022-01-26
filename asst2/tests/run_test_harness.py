@@ -11,7 +11,7 @@ TASKSYS_DEFAULT_NUM_THREADS = 8
 UNSPECIFIED_NUM_THREADS = -1
 
 PERF_THRESHOLD = 1.2
-NUM_TEST_RUNS = 5
+NUM_TEST_RUNS = 2
 
 LIST_OF_TESTS = [
     ("super_super_light", UNSPECIFIED_NUM_THREADS),
@@ -160,8 +160,8 @@ if __name__ == '__main__':
                 ref_cmd = "./%s_osx_x86 -n %d" % (REFERENCE_BINARY_NAME, num_threads);
         else:
             print("Reference binary: ./runtasks_ref_linux")
-            ref_cmd = "./%s_linux -n %d" % (REFERENCE_BINARY_NAME, num_threads);
-        student_cmd = "./%s -n %d" % (STUDENT_BINARY_NAME, num_threads);
+            ref_cmd = "./%s_linux -n %d -i 1" % (REFERENCE_BINARY_NAME, num_threads);
+        student_cmd = "./%s -n %d -i 1" % (STUDENT_BINARY_NAME, num_threads);
 
         cmds = [ref_cmd, student_cmd]
         is_references = [True, False]
