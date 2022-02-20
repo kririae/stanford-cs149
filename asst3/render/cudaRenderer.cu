@@ -609,10 +609,134 @@ void CudaRenderer::advanceAnimation() {
   cudaDeviceSynchronize();
 }
 
+#define BLOCK_NUM_X     64
+#define BLOCK_NUM_Y     64
+#define SCAN_BLOCK_DIM  1024  // needed by sharedMemExclusiveScan
+#define threadsPerBlock 1024
+#include "exclusiveScan.cu_inl"
+#include "circleBoxTest.cu_inl"
+#include <iostream>
+#define CUDA_CALL(expr)                                    \
+  {                                                        \
+    cudaError_t err = expr;                                \
+    if (err != cudaSuccess) {                              \
+      printf("CUDA Error: %s\n", cudaGetErrorString(err)); \
+    }                                                      \
+  }
+
+static void cuda3DArrayMallocHelper(cudaPitchedPtr* out, int x, int y, int z,
+                                    size_t size) {
+  // z continous in memory
+  cudaExtent tmpExtent = make_cudaExtent(size * z, x, y);
+  cudaMalloc3D(out, tmpExtent);
+}
+
+__device__ size_t cuda3DArrayOffsetHelper(cudaPitchedPtr in, int x, int y) {
+  return x * in.pitch + y * in.pitch * in.xsize;
+}
+
+__device__ size_t cuda3DArrayOffsetHelper(cudaPitchedPtr in, int x, int y,
+                                          int z) {
+  return z + x * in.pitch + y * in.pitch * in.xsize;
+}
+
+static __device__ __host__ inline int nextPow2(int n) {
+  n--;
+  n |= n >> 1;
+  n |= n >> 2;
+  n |= n >> 4;
+  n |= n >> 8;
+  n |= n >> 16;
+  n++;
+  return n;
+}
+
+__global__ static void kernelTraversePixelWithBlocks(unsigned int offset) {
+  // Due to the size limit of shared memory and thread block,
+  // offset is set
+  __shared__ unsigned int intersectBlockInput[threadsPerBlock];
+  __shared__ unsigned int intersectBlockOutput[threadsPerBlock];
+  __shared__ unsigned int intersectBlockScratch[threadsPerBlock * 2];
+  __shared__ unsigned int intersectBlockIndex[threadsPerBlock];
+
+  int xBlock = blockIdx.x;
+  int yBlock = blockIdx.y;
+
+  int width  = cuConstRendererParams.imageWidth;
+  int height = cuConstRendererParams.imageHeight;
+
+  float invWidth  = 1.f / width;
+  float invHeight = 1.f / height;
+
+  if (xBlock >= BLOCK_NUM_X || yBlock >= BLOCK_NUM_Y) return;
+  static_assert(SCAN_BLOCK_DIM == threadsPerBlock);
+  static_assert(SCAN_BLOCK_DIM <=
+                3072);  // Total amount of shared memory per block: 49152 bytes
+
+  int circleIndex                   = threadIdx.x;
+  int circleIndexOffset             = threadIdx.x + offset;
+  intersectBlockInput[circleIndex]  = 0;
+  intersectBlockIndex[circleIndex]  = 0;
+  intersectBlockOutput[circleIndex] = 0;
+  if (circleIndexOffset < cuConstRendererParams.numCircles) {
+    float circleX = cuConstRendererParams.position[circleIndexOffset * 3];
+    float circleY = cuConstRendererParams.position[circleIndexOffset * 3 + 1];
+    float circleRadius = cuConstRendererParams.radius[circleIndexOffset];
+    float boxL         = float(xBlock) / BLOCK_NUM_X;
+    float boxR         = float(xBlock + 1) / BLOCK_NUM_X;
+    float boxB         = float(yBlock) / BLOCK_NUM_Y;
+    float boxT         = float(yBlock + 1) / BLOCK_NUM_Y;
+    if (circleInBox(circleX, circleY, circleRadius, boxL, boxR, boxT, boxB)) {
+      intersectBlockInput[circleIndex] = 1;
+    }
+  }
+
+  __syncthreads();
+  sharedMemExclusiveScan(circleIndex, intersectBlockInput, intersectBlockOutput,
+                         intersectBlockScratch, threadsPerBlock);
+  __syncthreads();
+
+  // collect output to input as index again
+  if (circleIndexOffset < cuConstRendererParams.numCircles &&
+      intersectBlockInput[circleIndex] == 1) {
+    if (intersectBlockOutput[circleIndex] < cuConstRendererParams.numCircles) {
+      intersectBlockIndex[intersectBlockOutput[circleIndex]] =
+          circleIndexOffset + 1;
+    }
+  }
+
+  // __syncthreads();
+  int pixelsInBlock = (width / BLOCK_NUM_X) * (height / BLOCK_NUM_Y);
+  int blockWidth    = width / BLOCK_NUM_X;
+  int blockHeight   = height / BLOCK_NUM_Y;
+
+  for (int i = circleIndex; i < pixelsInBlock; i += blockDim.x) {
+    // Map i to (x, y)
+    int x = xBlock * blockWidth + (i % blockWidth);
+    int y = yBlock * blockHeight + (i / blockWidth);
+    // printf("%d %d\n", x, y);
+    if (x >= width || y >= height) continue;
+
+    float4* imgPtr =
+        (float4*)(&cuConstRendererParams.imageData[4 * (y * width + x)]);
+    for (int j = 0; j < threadsPerBlock; ++j) {
+      int index = intersectBlockIndex[j];
+      if (index == 0)
+        break;
+      else
+        --index;
+      float3 p = *(float3*)(&cuConstRendererParams.position[index * 3]);
+      float2 pixelCenterNorm =
+          make_float2(invWidth * (static_cast<float>(x) + 0.5f),
+                      invHeight * (static_cast<float>(y) + 0.5f));
+      shadePixel(index, pixelCenterNorm, p, imgPtr);
+    }
+  }
+}
+
 __global__ static void kernelTraversePixel() {
   int x = threadIdx.x + blockIdx.x * blockDim.x;
   int y = threadIdx.y + blockIdx.y * blockDim.y;
-  // int offset = x + y * blockDim.x * gridDim.x;
 
   int width  = cuConstRendererParams.imageWidth;
   int height = cuConstRendererParams.imageHeight;
@@ -634,52 +758,20 @@ __global__ static void kernelTraversePixel() {
   }
 }
 
-#define PIXEL_BLOCK_SIZE 16
-#define BLOCK_NUM_X      64
-#define BLOCK_NUM_Y      64
-#define SCAN_BLOCK_DIM   512  // needed by sharedMemExclusiveScan
-#define threadsPerBlock  512
-#include "exclusiveScan.cu_inl"
-
-__global__ static void kernelInitBoxCircleIntersection(
-    cudaPitchedPtr deviceIfIntersectBlock) {
-  int xBlock = blockIdx.x;
-  int yBlock = blockIdx.y;
-
-  if (xBlock >= BLOCK_NUM_X || yBlock >= BLOCK_NUM_Y) return;
-
-  __shared__ unsigned int intersectBlock[threadsPerBlock];
-
-  int circleIndex = threadIdx.x;
-  for (int i = circleIndex; i < cuConstRendererParams.numCircles;
-       i += blockDim.x) {
-    intersectBlock[i] = 1;
-    // int pitchIndex =
-    //     xBlock + yBlock * deviceIfIntersectBlock.pitch +
-    //     i * deviceIfIntersectBlock.pitch * deviceIfIntersectBlock.ysize;
-    // ((int*)deviceIfIntersectBlock.ptr)[pitchIndex] = 1;
+void CudaRenderer::render() {
+  dim3 gridDim(BLOCK_NUM_X, BLOCK_NUM_Y);
+  dim3 blockDim(image->width / BLOCK_NUM_X, image->height / BLOCK_NUM_Y);
+  for (int offset = 0; offset < numCircles; offset += threadsPerBlock) {
+    kernelTraversePixelWithBlocks<<<gridDim, threadsPerBlock>>>(offset);
+    {
+      cudaError_t cudaerr = cudaDeviceSynchronize();
+      if (cudaerr != cudaSuccess) {
+        fprintf(stderr, "kernel launch failed with error \"%s\".\n",
+                cudaGetErrorString(cudaerr));
+        exit(-1);
+      }
+    }
   }
 
-  __syncthreads();
-  // sharedMemExclusiveScan(circleIndex, intersectBlock, intersectBlock, )
-}
-
-void CudaRenderer::render() {
-  // TODO
-  // assert(PIXEL_BLOCK_SIZE * BLOCK_NUM_X >= image->width);
-  // assert(PIXEL_BLOCK_SIZE * BLOCK_NUM_Y >= image->height);
-
-  cudaPitchedPtr deviceIfIntersectBlock, deviceIntersectBlockIndex;
-  cudaExtent     inBlockExtent =
-      make_cudaExtent(sizeof(int) * BLOCK_NUM_X, BLOCK_NUM_Y, numCircles);
-  cudaMalloc3D(&deviceIfIntersectBlock, inBlockExtent);
-  cudaMalloc3D(&deviceIntersectBlockIndex, inBlockExtent);
-  dim3 gridDim(BLOCK_NUM_X, BLOCK_NUM_Y);
-
-  kernelInitBoxCircleIntersection<<<gridDim, threadsPerBlock>>>(
-      deviceIfIntersectBlock);
-
-  // // kernelRenderCircles<<<gridDim, blockDim>>>();
-  // kernelTraversePixel<<<gridDim, blockDim>>>();
-  // cudaDeviceSynchronize();
+  cudaDeviceSynchronize();
 }
