@@ -1,3 +1,6 @@
+#include <numeric>
+#include <iostream>
+#include <execution>
 #include "page_rank.h"
 
 #include <omp.h>
@@ -6,7 +9,6 @@
 #include <cmath>
 #include <utility>
 #include <functional>
-#include <numeric>
 
 #include "../common/CycleTimer.h"
 #include "../common/graph.h"
@@ -57,11 +59,40 @@ void pageRank(Graph g, double *solution, double damping, double convergence) {
 
    */
 
-  double *score_new = (double *) malloc(sizeof(double) * numNodes);
-  int *node_v = (int *) malloc(sizeof(int) * numNodes);
-  int *node_bk = (int *) malloc(sizeof(int) * numNodes);
+  double *score_new = (double *) aligned_alloc(sizeof(double), sizeof(double) * numNodes);
+  int *node_v = (int *) aligned_alloc(sizeof(int), sizeof(int) * numNodes);
+  int *node_bk = (int *) aligned_alloc(sizeof(int), sizeof(int) * numNodes);
   bool converged = false;
+  int numEmptyNodes = 0;
+#define CHUNK 500
+
+#pragma omp parallel for schedule(dynamic, CHUNK)
+  for (int vi = 0; vi < numNodes; ++vi)
+    // collect nodes with no outgoing edges (in parallel)
+    node_bk[vi] = outgoing_size(g, vi) == 0 ? 1 : 0;
+
+  std::exclusive_scan(std::execution::par_unseq, node_bk, node_bk + numNodes, node_v, 0);
+  numEmptyNodes = node_v[numNodes - 1] + node_bk[numNodes - 1];
+
+  // Collect index inplace
+#pragma omp parallel for schedule(dynamic, CHUNK)
+  for (int vi = 0; vi < numNodes; ++vi)
+    if (node_v[vi] == 1)
+      node_v[node_bk[vi]] = vi + 1; // +1 as a mark
+  free(node_bk);
+
   while (!converged) {
+    double delta_v = 0;
+#pragma omp parallel for reduction(+:delta_v) schedule(dynamic, CHUNK)
+    for (int v_index = 0; v_index < numEmptyNodes; ++v_index) {
+      const int v = node_v[v_index] - 1;
+      delta_v += solution[v];
+    }
+
+    delta_v *= damping;
+    delta_v /= numNodes;
+
+#pragma omp parallel for schedule(dynamic, CHUNK)
     for (int vi = 0; vi < numNodes; ++vi) {
       score_new[vi] = 0.0;
 
@@ -73,31 +104,19 @@ void pageRank(Graph g, double *solution, double damping, double convergence) {
         score_new[vi] += solution[vj] / outgoing_size(g, vj);
       }
 
-      score_new[vi] = (damping * score_new[vi]) + (1.0 - damping) / numNodes;
-
-      // collect nodes with no outgoing edges (in parallel)
-      if (outgoing_size(g, vi) == 0)
-        node_v[vi] = 1;
-      else
-        node_v[vi] = 0;
+      score_new[vi] = (damping * score_new[vi]) + (1.0 - damping) / numNodes + delta_v;
     }
 
-    memcpy(node_bk, node_v, sizeof(int) * numNodes);
-    std::exclusive_scan(node_bk, node_bk + numNodes);
-    // Collect index inplace
+    double global_diff = 0.0;
+#pragma omp parallel for reduction(+:global_diff) schedule(dynamic, CHUNK)
     for (int vi = 0; vi < numNodes; ++vi) {
-      if (node_v[vi] == 1) {
-        node_v[node_bk[vi]] = vi + 1; // +1 as a mark
-      }
+      global_diff += abs(score_new[vi] - solution[vi]);
+      solution[vi] = score_new[vi];
     }
 
-    for (int vi = 0; vi < numNodes; ++vi) {
-      for (int v_index = 0; node_v[v_index] != 0; ++v_index) {
-        const int v = node_v[v_index] - 1;
-        
-      }
-    }
+    converged = (global_diff < convergence);
   }
 
   free(score_new);
+  free(node_v);
 }
