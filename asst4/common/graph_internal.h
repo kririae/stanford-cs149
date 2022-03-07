@@ -29,7 +29,7 @@ static inline const Vertex* outgoing_end(const Graph g, Vertex v) {
   return g->outgoing_edges + offset;
 }
 
-static inline int outgoing_size(const Graph g, Vertex v) {
+static int outgoing_size(const Graph g, Vertex v) {
   REQUIRES(g != NULL);
   REQUIRES(0 <= v && v < num_nodes(g));
   if (v == g->num_nodes - 1) {
