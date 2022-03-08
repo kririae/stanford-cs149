@@ -329,7 +329,7 @@ int main(int argc, char** argv) {
     printf("----------------------------------------------------------\n");
   }
 
-  delete g;
+  free_graph(g);
 
   return 0;
 }
