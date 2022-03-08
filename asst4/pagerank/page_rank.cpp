@@ -79,7 +79,7 @@ void pageRank(Graph g, double *solution, double damping, double convergence) {
 #pragma omp parallel for schedule(dynamic, CHUNK)
   for (int vi = 0; vi < numNodes; ++vi)
     if (node_v[vi] == 1)
-      node_v[node_bk[vi]] = vi; // +1 as a mark
+      node_v[node_bk[vi]] = vi;
   free(node_bk);
 
   while (!converged) {
