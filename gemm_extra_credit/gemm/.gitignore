@@ -1,0 +1,4 @@
+objs/
+gemm
+mkl_intel.o
+mkl_intel.so

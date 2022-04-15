@@ -1,5 +1,5 @@
 CXX=g++ -m64 -fPIE
-CXXFLAGS=-I../common -Iobjs/ -O3 -Wall
+CXXFLAGS=-I../common -Iobjs/ -O3 -Wall -march=native -mtune=native
 LDLIBS=-lm $(TASKSYS_LIB)
 ISPC=ispc
 # note: requires AVX2
