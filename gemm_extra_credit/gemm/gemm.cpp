@@ -11,46 +11,118 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <assert.h>
 
-#define BLOCKSIZE (6)  // 62 * 62(N) * 8(bytes) \approx = 32KBytes
+#define BLOCKSIZE (4)  // 62 * 62(N) * 8(bytes) \approx = 32KBytes
 
 void __gemm_naive(int m, int n, int k, double *A, double *B, double *C,
-                   double alpha, double beta);
+                  double alpha, double beta);
 void __gemm_blocking(int m, int n, int k, double *A, double *B, double *C,
-                   double alpha, double beta);
+                     double alpha, double beta);
 
-void gemm(int m, int n, int k, double *A, double *B, double *C,
-                double alpha, double beta) {
+void gemm(int m, int n, int k, double *A, double *B, double *C, double alpha,
+          double beta) {
   // __gemm_naive(m, n, k, A, B, C, alpha, beta);
   __gemm_blocking(m, n, k, A, B, C, alpha, beta);
 }
 
-inline static void __gemm_block_L1_mul(int si, int sj, int sk, int m, int n,
-                                     int k, double *A, double *B, double *C,
-                                     double alpha, double beta) {
-  int ei = fmin(si + BLOCKSIZE, m);
-  int ej = fmin(sj + BLOCKSIZE, n);
-  int ek = fmin(sk + BLOCKSIZE, k);
-  // int ei = si + BLOCKSIZE;
-  // int ej = sj + BLOCKSIZE;
-  // int ek = sk + BLOCKSIZE;
-  int i, j, kk;
+__attribute__((always_inline)) size_t __get_idx(int m, int n, int nc) {
+  return m * nc + n;
+}
 
-  for (i = si; i < ei; i++) {
-    for (j = sj; j < ej; j++) {
+__attribute__((always_inline)) static void __gemm_block_L2_mul_naive(
+    int si, int sj, int sk, int m, int n, int k, double *A, double *B,
+    double *C, double alpha, double beta) {
+  // Matrix C is M x N  (M rows, N columns)
+  // Matrix A is M x K
+  // Matrix B is K x N
+
+  // starting from (si, sj, sk), mul 2*2 matrix through vectorization
+  // add the result to C
+  // A: starting from A[si, sk]
+  // B: startingf rom B[sk, sj]
+  // C: starting from C[si, sj]
+  // an 2 x 2 matrix
+
+  // Will be optimized out
+  const double A11 = A[__get_idx(si, sk, k)];
+  const double A12 = A[__get_idx(si, sk + 1, k)];
+  const double A21 = A[__get_idx(si + 1, sk, k)];
+  const double A22 = A[__get_idx(si + 1, sk + 1, k)];
+  const double B11 = B[__get_idx(sk, sj, n)];
+  const double B12 = B[__get_idx(sk, sj + 1, n)];
+  const double B21 = B[__get_idx(sk + 1, sj, n)];
+  const double B22 = B[__get_idx(sk + 1, sj + 1, n)];
+
+  C[__get_idx(si, sj, n)] += alpha * (A11 * B11 + A12 * B21);
+  C[__get_idx(si, sj + 1, n)] += alpha * (A11 * B12 + A12 * B22);
+  C[__get_idx(si + 1, sj, n)] += alpha * (A21 * B11 + A22 * B21);
+  C[__get_idx(si + 1, sj + 1, n)] += alpha * (A21 * B12 + A22 * B22);
+}
+
+__attribute__((always_inline)) static void __gemm_block_L4_mul(
+    int si, int sj, int sk, int m, int n, int k, double *A, double *B,
+    double *C, double alpha, double beta) {
+  // Matrix C is M x N  (M rows, N columns)
+  // Matrix A is M x K
+  // Matrix B is K x N
+
+  // starting from (si, sj, sk), mul 2*2 matrix through vectorization
+  // add the result to C
+  // A: starting from A[si, sk]
+  // B: startingf rom B[sk, sj]
+  // C: starting from C[si, sj]
+  // an 2 x 2 matrix
+
+  int i, j, kk;
+  // printf("running gemm_naive: (m=%d, n=%d, k=%d)\n", m, n, k);
+  for (i = 0; i < m; i++) {
+    for (j = 0; j < n; j++) {
       double inner_prod = 0;
-      for (kk = sk; kk < ek; kk++)
-        inner_prod += A[i * k + kk] * B[kk * n + j];
-      C[i * n + j] += alpha * inner_prod;
+      for (kk = 0; kk < k; kk++) inner_prod += A[i * k + kk] * B[kk * n + j];
+      C[i * n + j] = alpha * inner_prod + beta * C[i * n + j];
     }
   }
 }
 
+inline static void __gemm_block_L1_mul(int si, int sj, int sk, int m, int n, int k,
+                                double *A, double *B, double *C, double alpha,
+                                double beta) {
+#define MIN_BLOCK 2
+  int ei = fmin(si + BLOCKSIZE, m);
+  int ej = fmin(sj + BLOCKSIZE, n);
+  int ek = fmin(sk + BLOCKSIZE, k);
+  int i, j, kk;
+
+  assert(m % MIN_BLOCK == 0);
+  assert(n % MIN_BLOCK == 0);
+  assert(k % MIN_BLOCK == 0);
+
+#if MIN_BLOCK == 2
+  for (i = si; i < ei; i += MIN_BLOCK)
+    for (j = sj; j < ej; j += MIN_BLOCK)
+      for (kk = sk; kk < ek; kk += MIN_BLOCK)
+        __gemm_block_L2_mul_naive(i, j, kk, m, n, k, A, B, C, alpha, beta);
+#elif MIN_BLOCK == 4 
+  for (i = si; i < ei; i += MIN_BLOCK)
+    for (j = sj; j < ej; j += MIN_BLOCK)
+      for (kk = sk; kk < ek; kk += MIN_BLOCK)
+        __gemm_block_L4_mul(i, j, kk, m, n, k, A, B, C, alpha, beta);
+#else
+  static_assert("MIN_BLOCK size unsupported");
+  return;
+#endif
+}
+
 void __gemm_blocking(int m, int n, int k, double *A, double *B, double *C,
-                   double alpha, double beta) {
+                     double alpha, double beta) {
   int i, j, kk;
   static_assert(BLOCKSIZE % 2 == 0, "BLOCKSIZE % 2 must be 0");
   // printf("running gemm_blocking: (m=%d, n=%d, k=%d)\n", m, n, k);
+ 
+  assert(m % 4 ==  0);
+  assert(n % 4 ==  0);
+  assert(k % 4 ==  0);
 
   for (i = 0; i < m; ++i) {
     for (j = 0; j < n; ++j) {
@@ -68,16 +140,14 @@ void __gemm_blocking(int m, int n, int k, double *A, double *B, double *C,
 }
 
 void __gemm_naive(int m, int n, int k, double *A, double *B, double *C,
-                double alpha, double beta) {
+                  double alpha, double beta) {
   int i, j, kk;
   // printf("running gemm_naive: (m=%d, n=%d, k=%d)\n", m, n, k);
   for (i = 0; i < m; i++) {
     for (j = 0; j < n; j++) {
       double inner_prod = 0;
-      for (kk = 0; kk < k; kk++)
-        inner_prod += A[i * k + kk] * B[kk * n + j];
+      for (kk = 0; kk < k; kk++) inner_prod += A[i * k + kk] * B[kk * n + j];
       C[i * n + j] = alpha * inner_prod + beta * C[i * n + j];
     }
   }
 }
-

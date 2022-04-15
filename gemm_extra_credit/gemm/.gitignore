@@ -2,3 +2,5 @@ objs/
 gemm
 mkl_intel.o
 mkl_intel.so
+perf.data
+perf.data.old

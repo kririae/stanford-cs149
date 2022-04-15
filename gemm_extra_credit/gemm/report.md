@@ -33,3 +33,4 @@ And the speedup is 6.13.
 
 I'll investigate its vectorization rate in vtune on my friend's intel machine.
 But yet there's much space for improvement.
+
